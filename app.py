@@ -1,267 +1,160 @@
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from src.sentinellite.log_parser import parse_log_file
-from src.sentinellite.detector import detect_repeated_failures
-from src.sentinellite.reporting import build_report
-
+from sentinellite.log_parser import parse_log_file
+from sentinellite.detector import detect_threats
 
 st.set_page_config(
-    page_title="SentinelLite | SOC",
+    page_title="SentinelLite | SOC Dashboard",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
 .stApp {
-    background: #0b1120;
-    color: #e5edf7;
-}
-[data-testid="stHeader"] {
-    background: rgba(11, 17, 32, 0.95);
+    background-color: #0b1120;
+    color: #e5e7eb;
 }
 [data-testid="stSidebar"] {
-    background: #111a2c;
-    border-right: 1px solid #263449;
+    background-color: #111827;
 }
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-    max-width: 1500px;
+[data-testid="stMetric"] {
+    background-color: #172033;
+    border: 1px solid #263449;
+    padding: 18px;
+    border-radius: 12px;
 }
 h1, h2, h3 {
-    color: #edf5ff !important;
-}
-p, label, [data-testid="stCaptionContainer"] {
-    color: #9aacc4;
-}
-.metric-card {
-    background: #131e31;
-    border: 1px solid #26364c;
-    border-radius: 14px;
-    padding: 20px;
-    min-height: 125px;
-}
-.metric-label {
-    color: #9aacc4;
-    font-size: 0.88rem;
-    margin-bottom: 12px;
-}
-.metric-value {
-    color: #65e6c2;
-    font-size: 2rem;
-    font-weight: 700;
-}
-.section-card {
-    background: #111a2c;
-    border: 1px solid #263449;
-    border-radius: 14px;
-    padding: 18px;
-}
-.status-pill {
-    display: inline-block;
-    color: #65e6c2;
-    background: #15382f;
-    padding: 5px 10px;
-    border-radius: 20px;
-    font-size: 0.8rem;
-    font-weight: 600;
-}
-hr {
-    border-color: #263449;
-}
-div[data-testid="stDataFrame"] {
-    border: 1px solid #263449;
-    border-radius: 10px;
-}
-.stDownloadButton button {
-    background: #65e6c2;
-    color: #0b1120;
-    border: none;
-    font-weight: 700;
-    border-radius: 8px;
-}
-.stDownloadButton button:hover {
-    background: #8af2d5;
-    color: #0b1120;
+    color: #e5e7eb;
 }
 </style>
 """, unsafe_allow_html=True)
 
-
-def metric_card(label, value):
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-st.markdown(
-    '<span class="status-pill">● MONITORING ACTIVE</span>',
-    unsafe_allow_html=True,
-)
 st.title("🛡️ SentinelLite")
-st.caption("SECURITY OPERATIONS CENTER  /  AUTHENTICATION MONITORING")
+st.caption("Lightweight Security Operations Center | Security Event Monitoring")
 
-st.sidebar.markdown("## 🛡️ SentinelLite")
-st.sidebar.caption("SECURITY CONTROL PANEL")
-st.sidebar.divider()
+BASE_DIR = Path(__file__).resolve().parent
+LOG_FILE = BASE_DIR / "data" / "sample_auth.log"
 
-st.sidebar.subheader("Detection settings")
-threshold = st.sidebar.slider(
-    "Failed login threshold",
-    min_value=3,
-    max_value=10,
-    value=5,
-)
-window_minutes = st.sidebar.slider(
-    "Detection window (minutes)",
-    min_value=1,
-    max_value=15,
-    value=5,
-)
 
-st.sidebar.info(
-    "Demo environment: all included authentication events are synthetic."
-)
+@st.cache_data
+def load_events(file_path, modified_time):
+    return parse_log_file(file_path)
 
-if st.sidebar.button("Reload analysis", use_container_width=True):
-    st.rerun()
-
-log_path = Path("data/sample_auth.log")
 
 try:
-    events, errors = parse_log_file(log_path)
-    alerts = detect_repeated_failures(
-        events,
-        threshold=threshold,
-        window_minutes=window_minutes,
-    )
-    report = build_report(events, errors, alerts)
-except (OSError, ValueError, KeyError) as error:
-    st.error(f"Unable to load or analyze logs: {error}")
+    events = load_events(str(LOG_FILE), LOG_FILE.stat().st_mtime)
+except Exception as exc:
+    st.error(f"Could not load the authentication log: {exc}")
     st.stop()
 
-st.markdown("## Security overview")
+if isinstance(events, pd.DataFrame):
+    df = events.copy()
+else:
+    df = pd.DataFrame(events)
 
-c1, c2, c3, c4 = st.columns(4)
+if df.empty:
+    st.warning("No events were found in the log file.")
+    st.stop()
 
-with c1:
-    metric_card("TOTAL EVENTS", report["total_events"])
-with c2:
-    metric_card("INVALID RECORDS", report["invalid_records"])
-with c3:
-    metric_card("THREAT ALERTS", report["total_alerts"])
-with c4:
-    metric_card(
-        "HIGH SEVERITY",
-        report["severity_counts"].get("HIGH", 0),
+st.subheader("Security Overview")
+
+total_events = len(df)
+
+threats = detect_threats(events)
+if isinstance(threats, pd.DataFrame):
+    alerts_df = threats.copy()
+else:
+    alerts_df = pd.DataFrame(threats or [])
+
+if alerts_df.empty:
+    high_alerts = 0
+else:
+    severity_col = next(
+        (c for c in alerts_df.columns if c.lower() == "severity"),
+        None,
+    )
+    high_alerts = (
+        int(alerts_df[severity_col].astype(str).str.lower()
+            .isin(["high", "critical"]).sum())
+        if severity_col else 0
     )
 
-st.write("")
-left, right = st.columns([1.65, 1])
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Events", total_events)
+col2.metric("Alerts Detected", len(alerts_df))
+col3.metric("High / Critical Alerts", high_alerts)
+
+st.divider()
+
+left, right = st.columns(2)
 
 with left:
-    st.markdown("## 🚨 Threat alerts")
+    st.subheader("Event Distribution")
+    event_col = next(
+        (c for c in df.columns
+         if c.lower() in ["event_type", "event", "type", "action"]),
+        None,
+    )
 
-    if alerts:
-        alert_df = pd.DataFrame(alerts)
-        st.dataframe(
-            alert_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+    if event_col:
+        counts = df[event_col].astype(str).value_counts()
+        st.bar_chart(counts)
     else:
-        st.success("No alerts matched the current detection settings.")
+        st.info("No recognized event-type column was found.")
+        st.dataframe(df.head(10), use_container_width=True)
 
 with right:
-    st.markdown("## 📊 Event distribution")
-
-    if not events.empty:
-        counts = (
-            events["event_type"]
-            .value_counts()
-            .rename_axis("Event type")
-            .reset_index(name="Count")
-        )
-        st.bar_chart(counts, x="Event type", y="Count")
+    st.subheader("Threat Alerts")
+    if alerts_df.empty:
+        st.success("No threats detected by the current detector.")
+    else:
+        st.dataframe(alerts_df, use_container_width=True)
 
 st.divider()
-st.markdown("## 🔎 Authentication event explorer")
+st.subheader("Authentication Event Log")
 
-if not events.empty:
-    filter_col1, filter_col2 = st.columns(2)
-
-    available_types = sorted(events["event_type"].unique().tolist())
-
-    with filter_col1:
-        selected_types = st.multiselect(
-            "Event type",
-            options=available_types,
-            default=available_types,
-        )
-
-    with filter_col2:
-        available_ips = sorted(events["source_ip"].unique().tolist())
-        selected_ips = st.multiselect(
-            "Source IP",
-            options=available_ips,
-            default=available_ips,
-        )
-
-    filtered = events[
-        events["event_type"].isin(selected_types)
-        & events["source_ip"].isin(selected_ips)
-    ].sort_values("timestamp", ascending=False)
-
-    st.caption(f"Showing {len(filtered)} of {len(events)} events")
-    st.dataframe(
-        filtered,
-        use_container_width=True,
-        hide_index=True,
+if "event_type" in df.columns:
+    event_types = sorted(df["event_type"].dropna().astype(str).unique())
+    selected_types = st.multiselect(
+        "Filter by event type",
+        event_types,
+        default=event_types,
     )
+    filtered_df = df[df["event_type"].astype(str).isin(selected_types)]
+else:
+    filtered_df = df
 
-st.divider()
-st.markdown("## 📄 Export investigation report")
+st.dataframe(filtered_df, use_container_width=True)
 
-report_payload = json.dumps(
-    report,
-    indent=2,
-    default=str,
+st.download_button(
+    "Download Events as CSV",
+    data=filtered_df.to_csv(index=False).encode("utf-8"),
+    file_name="sentinellite_events.csv",
+    mime="text/csv",
 )
 
-download_col, info_col = st.columns([1, 2])
+report = {
+    "total_events": total_events,
+    "alerts_detected": len(alerts_df),
+    "high_critical_alerts": high_alerts,
+    "events": df.to_dict(orient="records"),
+    "alerts": alerts_df.to_dict(orient="records"),
+}
 
-with download_col:
-    st.download_button(
-        "⬇ Download JSON report",
-        data=report_payload,
-        file_name="sentinellite_report.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-
-with info_col:
-    st.caption(
-        "Includes event totals, validation errors, alert severity, "
-        "timestamps, and detection evidence."
-    )
-
-st.divider()
-st.caption(
-    "SentinelLite • Educational defensive security project • "
-    f"Report generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+st.download_button(
+    "Download Security Report (JSON)",
+    data=json.dumps(report, indent=2, default=str),
+    file_name="sentinellite_report.json",
+    mime="application/json",
 )
 
+if st.button("Refresh Dashboard"):
+    st.cache_data.clear()
+    st.rerun()
+o
